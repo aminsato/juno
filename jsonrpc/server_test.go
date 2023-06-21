@@ -1,6 +1,7 @@
 package jsonrpc_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/NethermindEth/juno/jsonrpc"
@@ -122,8 +123,9 @@ func TestHandle(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		req string
-		res string
+		isBatch bool
+		req     string
+		res     string
 	}{
 		"invalid json": {
 			req: `{]`,
@@ -195,6 +197,7 @@ func TestHandle(t *testing.T) {
 			res: `[{"jsonrpc":"2.0","result":{"doubled":10},"id":5}]`,
 		},
 		"multiple requests in batch": {
+			isBatch: true,
 			req: `[{"jsonrpc" : "2.0", "method" : "method",
 					"params" : { "num" : 5 } , "id" : 5},
 					{"jsonrpc" : "2.0", "method" : "method",
@@ -202,6 +205,7 @@ func TestHandle(t *testing.T) {
 			res: `[{"jsonrpc":"2.0","result":{"doubled":10},"id":5},{"jsonrpc":"2.0","result":{"doubled":88},"id":6}]`,
 		},
 		"failing and successful requests mixed in a batch": {
+			isBatch: true,
 			req: `[{"jsonrpc" : "2.0", "method" : "method",
 					"params" : { "num" : 5 } , "id" : 5},
 					{"jsonrpc" : "2.0", "method" : "fail",
@@ -215,6 +219,7 @@ func TestHandle(t *testing.T) {
 			res: ``,
 		},
 		"batch with notif and string id": {
+			isBatch: true,
 			req: `[{"jsonrpc" : "2.0", "method" : "method",
 					"params" : { "num" : 5 }},
 					{"jsonrpc" : "2.0", "method" : "fail",
@@ -296,6 +301,7 @@ func TestHandle(t *testing.T) {
 			res: `{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid Params","data":"json: cannot unmarshal string into Go value of type int"},"id":3}`,
 		},
 		"multiple versions in batch": {
+			isBatch: true,
 			req: `[{"jsonrpc" : "1.0", "method" : "method",
 					"params" : { "num" : 5 } , "id" : 5},
 					{"jsonrpc" : "2.0", "method" : "method",
@@ -363,8 +369,9 @@ func TestHandle(t *testing.T) {
 			res: `[{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":"json: cannot unmarshal number into Go value of type jsonrpc.request"},"id":null}]`,
 		},
 		"rpc call with invalid Batch": {
-			req: `[1,2,3]`,
-			res: `[{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":"json: cannot unmarshal number into Go value of type jsonrpc.request"},"id":null},{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":"json: cannot unmarshal number into Go value of type jsonrpc.request"},"id":null},{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":"json: cannot unmarshal number into Go value of type jsonrpc.request"},"id":null}]`,
+			isBatch: true,
+			req:     `[1,2,3]`,
+			res:     `[{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":"json: cannot unmarshal number into Go value of type jsonrpc.request"},"id":null},{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":"json: cannot unmarshal number into Go value of type jsonrpc.request"},"id":null},{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request","data":"json: cannot unmarshal number into Go value of type jsonrpc.request"},"id":null}]`,
 		},
 	}
 
@@ -372,7 +379,24 @@ func TestHandle(t *testing.T) {
 		t.Run(desc, func(t *testing.T) {
 			res, err := server.Handle([]byte(test.req))
 			require.NoError(t, err)
-			assert.Equal(t, test.res, string(res))
+
+			if test.isBatch {
+				assertBatchResponse(t, test.res, string(res))
+			} else {
+				assert.Equal(t, test.res, string(res))
+			}
 		})
 	}
+}
+
+func assertBatchResponse(t *testing.T, expectedStr, actualStr string) {
+	var expected []json.RawMessage
+	var actual []json.RawMessage
+
+	err := json.Unmarshal([]byte(expectedStr), &expected)
+	require.NoError(t, err)
+	err = json.Unmarshal([]byte(actualStr), &actual)
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, expected, actual)
 }
