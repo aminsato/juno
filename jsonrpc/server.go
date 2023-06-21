@@ -4,13 +4,16 @@ package jsonrpc
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/go-playground/validator/v10"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -139,13 +142,13 @@ func (s *Server) RegisterMethod(method Method) error {
 // It returns the response in a byte array, only returns an
 // error if it can not create the response byte array
 func (s *Server) Handle(data []byte) ([]byte, error) {
-	return s.HandleReader(bytes.NewReader(data))
+	return s.HandleReader(context.Background(), bytes.NewReader(data))
 }
 
 // HandleReader processes a request to the server
 // It returns the response in a byte array, only returns an
 // error if it can not create the response byte array
-func (s *Server) HandleReader(reader io.Reader) ([]byte, error) {
+func (s *Server) HandleReader(ctx context.Context, reader io.Reader) ([]byte, error) {
 	bufferedReader := bufio.NewReader(reader)
 	requestIsBatch := isBatch(bufferedReader)
 	res := &response{
@@ -176,41 +179,53 @@ func (s *Server) HandleReader(reader io.Reader) ([]byte, error) {
 		} else if len(batchReq) == 0 {
 			res.Error = Err(InvalidRequest, "empty batch")
 		} else {
-			for _, rawReq := range batchReq { // todo: handle async
-				var resObject *response
+			var resMutex sync.Mutex
+			g, _ := errgroup.WithContext(ctx)
+			for _, rawReq := range batchReq {
+				rawReq := rawReq
+				g.Go(func() error {
+					var resObject *response
 
-				reqDec := json.NewDecoder(bytes.NewBuffer(rawReq))
-				reqDec.UseNumber()
+					reqDec := json.NewDecoder(bytes.NewBuffer(rawReq))
+					reqDec.UseNumber()
 
-				req := new(request)
-				if jsonErr := reqDec.Decode(req); jsonErr != nil {
-					resObject = &response{
-						Version: "2.0",
-						Error:   Err(InvalidRequest, jsonErr.Error()),
-					}
-				} else {
-					var handleErr error
-					resObject, handleErr = s.handleRequest(req)
-					if handleErr != nil {
+					req := new(request)
+					if jsonErr := reqDec.Decode(req); jsonErr != nil {
 						resObject = &response{
 							Version: "2.0",
-							Error:   Err(InvalidRequest, handleErr.Error()),
+							Error:   Err(InvalidRequest, jsonErr.Error()),
 						}
-						if !errors.Is(handleErr, ErrInvalidID) {
-							resObject.ID = req.ID
-						}
-					}
-				}
-
-				if resObject != nil {
-					if resArr, jsonErr := json.Marshal(resObject); jsonErr != nil {
-						return nil, jsonErr
 					} else {
-						batchRes = append(batchRes, resArr)
+						var handleErr error
+						resObject, handleErr = s.handleRequest(req)
+						if handleErr != nil {
+							resObject = &response{
+								Version: "2.0",
+								Error:   Err(InvalidRequest, handleErr.Error()),
+							}
+							if !errors.Is(handleErr, ErrInvalidID) {
+								resObject.ID = req.ID
+							}
+						}
 					}
-				}
+
+					if resObject != nil {
+						if resArr, jsonErr := json.Marshal(resObject); jsonErr != nil {
+							return jsonErr
+						} else {
+							resMutex.Lock()
+							batchRes = append(batchRes, resArr)
+							resMutex.Unlock()
+						}
+					}
+
+					return nil
+				})
 			}
 
+			if err := g.Wait(); err != nil {
+				return nil, err
+			}
 			if len(batchRes) == 0 {
 				return nil, nil
 			}
