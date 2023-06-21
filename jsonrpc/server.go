@@ -13,7 +13,7 @@ import (
 	"sync"
 
 	"github.com/go-playground/validator/v10"
-	"golang.org/x/sync/errgroup"
+	"github.com/sourcegraph/conc/pool"
 )
 
 const (
@@ -141,8 +141,8 @@ func (s *Server) RegisterMethod(method Method) error {
 // Handle processes a request to the server
 // It returns the response in a byte array, only returns an
 // error if it can not create the response byte array
-func (s *Server) Handle(data []byte) ([]byte, error) {
-	return s.HandleReader(context.Background(), bytes.NewReader(data))
+func (s *Server) Handle(ctx context.Context, data []byte) ([]byte, error) {
+	return s.HandleReader(ctx, bytes.NewReader(data))
 }
 
 // HandleReader processes a request to the server
@@ -188,14 +188,14 @@ func (s *Server) HandleReader(ctx context.Context, reader io.Reader) ([]byte, er
 	return json.Marshal(res)
 }
 
-func (s *Server) handleBatchRequest(ctx context.Context, batchReq []json.RawMessage) ([]byte, error) {
+func (s *Server) handleBatchRequest(_ context.Context, batchReq []json.RawMessage) ([]byte, error) {
 	var batchRes []json.RawMessage
 	var resMutex sync.Mutex
 
-	g, _ := errgroup.WithContext(ctx)
+	p := pool.New().WithErrors()
 	for _, rawReq := range batchReq {
 		rawReq := rawReq
-		g.Go(func() error {
+		p.Go(func() error {
 			var resObject *response
 
 			reqDec := json.NewDecoder(bytes.NewBuffer(rawReq))
@@ -235,7 +235,7 @@ func (s *Server) handleBatchRequest(ctx context.Context, batchReq []json.RawMess
 		})
 	}
 
-	if err := g.Wait(); err != nil {
+	if err := p.Wait(); err != nil {
 		return nil, err
 	}
 	if len(batchRes) == 0 {
