@@ -162,7 +162,7 @@ func (s *Server) HandleReader(ctx context.Context, reader io.Reader) ([]byte, er
 		req := new(request)
 		if jsonErr := dec.Decode(req); jsonErr != nil {
 			res.Error = Err(InvalidJSON, jsonErr.Error())
-		} else if resObject, handleErr := s.handleRequest(req); handleErr != nil {
+		} else if resObject, handleErr := s.handleRequest(ctx, req); handleErr != nil {
 			if !errors.Is(handleErr, ErrInvalidID) {
 				res.ID = req.ID
 			}
@@ -188,9 +188,12 @@ func (s *Server) HandleReader(ctx context.Context, reader io.Reader) ([]byte, er
 	return json.Marshal(res)
 }
 
-func (s *Server) handleBatchRequest(_ context.Context, batchReq []json.RawMessage) ([]byte, error) {
+func (s *Server) handleBatchRequest(ctx context.Context, batchReq []json.RawMessage) ([]byte, error) {
 	var batchRes []json.RawMessage
 	var resMutex sync.Mutex
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	p := pool.New().WithErrors()
 	for _, rawReq := range batchReq {
@@ -203,13 +206,14 @@ func (s *Server) handleBatchRequest(_ context.Context, batchReq []json.RawMessag
 
 			req := new(request)
 			if jsonErr := reqDec.Decode(req); jsonErr != nil {
+				cancel()
 				resObject = &response{
 					Version: "2.0",
 					Error:   Err(InvalidRequest, jsonErr.Error()),
 				}
 			} else {
 				var handleErr error
-				resObject, handleErr = s.handleRequest(req)
+				resObject, handleErr = s.handleRequest(ctx, req)
 				if handleErr != nil {
 					resObject = &response{
 						Version: "2.0",
@@ -266,9 +270,15 @@ func isNil(i any) bool {
 	return i == nil || reflect.ValueOf(i).IsNil()
 }
 
-func (s *Server) handleRequest(req *request) (*response, error) {
+func (s *Server) handleRequest(ctx context.Context, req *request) (*response, error) {
 	if err := req.isSane(); err != nil {
 		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, nil
+	default:
 	}
 
 	res := &response{
