@@ -45,6 +45,7 @@ type Reader interface {
 
 var (
 	ErrParentDoesNotMatchHead = errors.New("block's parent hash does not match head block hash")
+	ErrBlockConflictsWithL1   = errors.New("block conflicts with L1 head")
 	supportedStarknetVersion  = semver.MustParse("0.12.0")
 )
 
@@ -308,7 +309,7 @@ func (b *Blockchain) SetL1Head(update *core.L1Head) error {
 // Store takes a block and state update and performs sanity checks before putting in the database.
 func (b *Blockchain) Store(block *core.Block, stateUpdate *core.StateUpdate, newClasses map[felt.Felt]core.Class) error {
 	return b.database.Update(func(txn db.Transaction) error {
-		if err := verifyBlock(txn, block); err != nil {
+		if err := b.verifyBlock(txn, block); err != nil {
 			return err
 		}
 		if err := core.NewState(txn).Update(block.Number, stateUpdate, newClasses); err != nil {
@@ -342,11 +343,11 @@ func (b *Blockchain) Store(block *core.Block, stateUpdate *core.StateUpdate, new
 // VerifyBlock assumes the block has already been sanity-checked.
 func (b *Blockchain) VerifyBlock(block *core.Block) error {
 	return b.database.View(func(txn db.Transaction) error {
-		return verifyBlock(txn, block)
+		return b.verifyBlock(txn, block)
 	})
 }
 
-func verifyBlock(txn db.Transaction, block *core.Block) error {
+func (b *Blockchain) verifyBlock(txn db.Transaction, block *core.Block) error {
 	if err := checkBlockVersion(block.ProtocolVersion); err != nil {
 		return err
 	}
@@ -367,6 +368,26 @@ func verifyBlock(txn db.Transaction, block *core.Block) error {
 	}
 	if !block.ParentHash.Equal(expectedParentHash) {
 		return ErrParentDoesNotMatchHead
+	}
+
+	head, err := l1Head(txn)
+	switch {
+	case err == nil:
+		var header *core.Header
+		if head.BlockNumber == block.Number {
+			header = block.Header
+		} else {
+			header, err = blockHeaderByNumber(txn, head.BlockNumber)
+		}
+
+		if err == nil && !head.BlockHash.Equal(header.Hash) {
+			return ErrBlockConflictsWithL1
+		} else if !errors.Is(err, db.ErrKeyNotFound) {
+			return err
+		}
+	case errors.Is(err, db.ErrKeyNotFound):
+	default:
+		return err
 	}
 
 	return nil

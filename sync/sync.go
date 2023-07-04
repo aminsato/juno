@@ -140,13 +140,13 @@ func (s *Synchronizer) verifierTask(ctx context.Context, block *core.Block, stat
 			return
 		default:
 			if err != nil {
-				s.log.Warnw("Sanity checks failed", "number", block.Number, "hash", block.Hash.ShortString())
+				s.log.Warnw("Sanity checks failed", "number", block.Number, "hash", block.Hash.ShortString(), "err", err)
 				resetStreams()
 				return
 			}
 			err = s.Blockchain.Store(block, stateUpdate, newClasses)
 			if err != nil {
-				if errors.Is(err, blockchain.ErrParentDoesNotMatchHead) {
+				if errors.Is(err, blockchain.ErrParentDoesNotMatchHead) || errors.Is(err, blockchain.ErrBlockConflictsWithL1) {
 					// revert the head and restart the sync process, hoping that the reorg is not deep
 					// if the reorg is deeper, we will end up here again and again until we fully revert reorged
 					// blocks
