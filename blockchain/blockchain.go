@@ -740,6 +740,17 @@ func revertHead(txn db.Transaction) error {
 	if err != nil {
 		return err
 	}
+
+	// Don't revert part of the L1-verified chain.
+	// If the L1 head isn't in the db yet, revert.
+	// If the L2 height is less than the L1 height, don't revert.
+	var head *core.L1Head
+	if head, err = l1Head(txn); err != nil && !errors.Is(err, db.ErrKeyNotFound) {
+		return err
+	} else if head != nil && blockNumber <= head.BlockNumber {
+		return errors.New("cannot revert L1-verified block")
+	}
+
 	numBytes := core.MarshalBlockNumber(blockNumber)
 
 	stateUpdate, err := stateUpdateByNumber(txn, blockNumber)
@@ -766,28 +777,9 @@ func revertHead(txn db.Transaction) error {
 		return err
 	}
 
-	blockIDAndIndex := txAndReceiptDBKey{
-		Number: blockNumber,
-	}
 	// remove txs and receipts
-	for i := uint64(0); i < header.TransactionCount; i++ {
-		blockIDAndIndex.Index = i
-		var reorgedTxn core.Transaction
-		reorgedTxn, err = transactionByBlockNumberAndIndex(txn, &blockIDAndIndex)
-		if err != nil {
-			return err
-		}
-
-		keySuffix := blockIDAndIndex.MarshalBinary()
-		if err = txn.Delete(db.TransactionsByBlockNumberAndIndex.Key(keySuffix)); err != nil {
-			return err
-		}
-		if err = txn.Delete(db.ReceiptsByBlockNumberAndIndex.Key(keySuffix)); err != nil {
-			return err
-		}
-		if err = txn.Delete(db.TransactionBlockNumbersAndIndicesByHash.Key(reorgedTxn.Hash().Marshal())); err != nil {
-			return err
-		}
+	if err = revertTransactionsAndReceipts(txn, header); err != nil {
+		return err
 	}
 
 	// remove state update
@@ -807,6 +799,33 @@ func revertHead(txn db.Transaction) error {
 
 	heightBin := core.MarshalBlockNumber(blockNumber - 1)
 	return txn.Set(db.ChainHeight.Key(), heightBin)
+}
+
+func revertTransactionsAndReceipts(txn db.Transaction, header *core.Header) error {
+	blockIDAndIndex := txAndReceiptDBKey{
+		Number: header.Number,
+	}
+	// remove txs and receipts
+	for i := uint64(0); i < header.TransactionCount; i++ {
+		blockIDAndIndex.Index = i
+		var reorgedTxn core.Transaction
+		reorgedTxn, err := transactionByBlockNumberAndIndex(txn, &blockIDAndIndex)
+		if err != nil {
+			return err
+		}
+
+		keySuffix := blockIDAndIndex.MarshalBinary()
+		if err = txn.Delete(db.TransactionsByBlockNumberAndIndex.Key(keySuffix)); err != nil {
+			return err
+		}
+		if err = txn.Delete(db.ReceiptsByBlockNumberAndIndex.Key(keySuffix)); err != nil {
+			return err
+		}
+		if err = txn.Delete(db.TransactionBlockNumbersAndIndicesByHash.Key(reorgedTxn.Hash().Marshal())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // StorePending stores a pending block given that it is for the next height

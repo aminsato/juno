@@ -595,6 +595,36 @@ func TestRevert(t *testing.T) {
 	})
 }
 
+func TestCannotRevertL1Head(t *testing.T) {
+	testdb := pebble.NewMemTest()
+	chain := blockchain.New(testdb, utils.MAINNET, utils.NewNopZapLogger())
+
+	client, closeFn := feeder.NewTestClient(utils.MAINNET)
+	t.Cleanup(closeFn)
+	gw := adaptfeeder.New(client)
+
+	for i := uint64(0); i < 3; i++ {
+		b, err := gw.BlockByNumber(context.Background(), i)
+		require.NoError(t, err)
+
+		su, err := gw.StateUpdate(context.Background(), i)
+		require.NoError(t, err)
+
+		require.NoError(t, chain.Store(b, su, nil))
+	}
+
+	t.Run("without L1 head, revert", func(t *testing.T) {
+		require.NoError(t, chain.RevertHead())
+	})
+
+	t.Run("with L1 head, error", func(t *testing.T) {
+		require.NoError(t, chain.SetL1Head(&core.L1Head{
+			BlockNumber: 1,
+		}))
+		require.Error(t, chain.RevertHead())
+	})
+}
+
 func TestL1Update(t *testing.T) {
 	heads := []*core.L1Head{
 		{
