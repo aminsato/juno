@@ -215,11 +215,11 @@ func TestStore(t *testing.T) {
 	gw := adaptfeeder.New(client)
 	log := utils.NewNopZapLogger()
 
-	block0, err := gw.BlockByNumber(context.Background(), 0)
-	require.NoError(t, err)
+	block0, gatewayErr := gw.BlockByNumber(context.Background(), 0)
+	require.NoError(t, gatewayErr)
 
-	stateUpdate0, err := gw.StateUpdate(context.Background(), 0)
-	require.NoError(t, err)
+	stateUpdate0, gatewayErr := gw.StateUpdate(context.Background(), 0)
+	require.NoError(t, gatewayErr)
 
 	t.Run("add block to empty blockchain", func(t *testing.T) {
 		chain := blockchain.New(pebble.NewMemTest(), utils.MAINNET, log)
@@ -280,7 +280,7 @@ func TestStore(t *testing.T) {
 			BlockHash:   new(felt.Felt),
 			StateRoot:   new(felt.Felt),
 		}
-		err = chain.SetL1Head(l1Head)
+		err := chain.SetL1Head(l1Head)
 		require.NoError(t, err)
 		require.NoError(t, chain.Store(block0, stateUpdate0, nil))
 	})
@@ -295,7 +295,7 @@ func TestStore(t *testing.T) {
 			BlockHash:   new(felt.Felt),
 			StateRoot:   new(felt.Felt),
 		}
-		err = chain.SetL1Head(l1Head)
+		err := chain.SetL1Head(l1Head)
 		require.NoError(t, err)
 		require.ErrorIs(t, chain.Store(block0, stateUpdate0, nil), blockchain.ErrBlockConflictsWithL1)
 	})
@@ -649,8 +649,13 @@ func TestCannotRevertL1Head(t *testing.T) {
 	})
 
 	t.Run("with L1 head, error", func(t *testing.T) {
+		number := uint64(1)
+		header, err := chain.BlockHeaderByNumber(number)
+		require.NoError(t, err)
 		require.NoError(t, chain.SetL1Head(&core.L1Head{
-			BlockNumber: 1,
+			BlockNumber: number,
+			BlockHash:   header.Hash,
+			StateRoot:   header.GlobalStateRoot,
 		}))
 		require.Error(t, chain.RevertHead())
 	})
@@ -677,6 +682,37 @@ func TestL1Update(t *testing.T) {
 			assert.Equal(t, head, got)
 		})
 	}
+}
+
+// TestSetIncompatibleL1Head creates L2 chain of length n and sets the L1 head for block n-k
+// with a conflicting block hash. It passes when the blockchain correctly rolls back the L2 head.
+func TestSetIncompatibleL1Head(t *testing.T) {
+	client, closeFn := feeder.NewTestClient(utils.MAINNET)
+	t.Cleanup(closeFn)
+	gw := adaptfeeder.New(client)
+
+	chain := blockchain.New(pebble.NewMemTest(), utils.MAINNET, utils.NewNopZapLogger())
+
+	block0, err := gw.BlockByNumber(context.Background(), 0)
+	require.NoError(t, err)
+	su0, err := gw.StateUpdate(context.Background(), 0)
+	require.NoError(t, err)
+	require.NoError(t, chain.Store(block0, su0, nil))
+
+	block1, err := gw.BlockByNumber(context.Background(), 1)
+	require.NoError(t, err)
+	su1, err := gw.StateUpdate(context.Background(), 1)
+	require.NoError(t, err)
+	require.NoError(t, chain.Store(block1, su1, nil))
+
+	require.NoError(t, chain.SetL1Head(&core.L1Head{
+		BlockNumber: 0,
+		BlockHash:   block0.Hash.Add(block0.Hash, new(felt.Felt).SetUint64(1)), // Doesn't match block 0 block hash.
+		StateRoot:   new(felt.Felt),
+	}))
+
+	_, err = chain.Height()
+	require.ErrorIs(t, err, db.ErrKeyNotFound) // Height should not exist
 }
 
 func TestPending(t *testing.T) {

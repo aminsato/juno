@@ -302,7 +302,39 @@ func (b *Blockchain) SetL1Head(update *core.L1Head) error {
 		return err
 	}
 	return b.database.Update(func(txn db.Transaction) error {
-		return txn.Set(db.L1Height.Key(), updateBytes)
+		if err := txn.Set(db.L1Height.Key(), updateBytes); err != nil {
+			return err
+		}
+		header, err := blockHeaderByNumber(txn, update.BlockNumber)
+		switch {
+		case err == nil:
+			if header.Hash.Equal(update.BlockHash) {
+				return nil
+			}
+		case errors.Is(err, db.ErrKeyNotFound):
+			return nil
+		default:
+			return err
+		}
+
+		// New L1 head conflicts with L2 chain.
+		// Revert the L2 chain to one block before the new L1 head.
+		var l2Height uint64
+		l2Height, err = chainHeight(txn)
+		switch {
+		case err == nil:
+			for i := uint64(0); i < l2Height-update.BlockNumber+1; i++ {
+				if err = revertHead(txn); err != nil {
+					return err
+				}
+			}
+		case errors.Is(err, db.ErrKeyNotFound):
+			// This shouldn't happen since we got the block header above.
+		default:
+			return err
+		}
+
+		return nil
 	})
 }
 
@@ -762,14 +794,22 @@ func revertHead(txn db.Transaction) error {
 		return err
 	}
 
-	// Don't revert part of the L1-verified chain.
-	// If the L1 head isn't in the db yet, revert.
-	// If the L2 height is less than the L1 height, don't revert.
-	var head *core.L1Head
-	if head, err = l1Head(txn); err != nil && !errors.Is(err, db.ErrKeyNotFound) {
+	header, err := blockHeaderByNumber(txn, blockNumber)
+	if err != nil {
 		return err
-	} else if head != nil && blockNumber <= head.BlockNumber {
-		return errors.New("cannot revert L1-verified block")
+	}
+
+	var head *core.L1Head
+	head, err = l1Head(txn)
+	switch {
+	case err == nil:
+		// Don't the L2 head when it matches the L1 head.
+		if blockNumber == head.BlockNumber && header.Hash.Equal(head.BlockHash) {
+			return errors.New("cannot revert L1-verified block")
+		}
+	case errors.Is(err, db.ErrKeyNotFound):
+	default:
+		return err
 	}
 
 	numBytes := core.MarshalBlockNumber(blockNumber)
@@ -782,11 +822,6 @@ func revertHead(txn db.Transaction) error {
 	state := core.NewState(txn)
 	// revert state
 	if err = state.Revert(blockNumber, stateUpdate); err != nil {
-		return err
-	}
-
-	header, err := blockHeaderByNumber(txn, blockNumber)
-	if err != nil {
 		return err
 	}
 
