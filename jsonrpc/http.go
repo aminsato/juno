@@ -68,7 +68,7 @@ func (h *HTTP) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
 	}
 
 	req.Body = http.MaxBytesReader(writer, req.Body, MaxRequestBodySize)
-	resp, err := h.rpc.HandleReader(req.Body)
+	resp, err := h.rpc.HandleReader(context.Background(), req.Body)
 	writer.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		writer.WriteHeader(http.StatusInternalServerError)

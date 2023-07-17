@@ -4,6 +4,7 @@ package jsonrpc
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,7 +23,11 @@ const (
 	InternalError  = -32603 // Internal JSON-RPC error.
 )
 
-var ErrInvalidID = errors.New("id should be a string or an integer")
+var (
+	ErrInvalidID = errors.New("id should be a string or an integer")
+
+	contextInterface = reflect.TypeOf((*context.Context)(nil)).Elem()
+)
 
 type request struct {
 	Version string `json:"jsonrpc"`
@@ -94,6 +99,10 @@ type Method struct {
 	Name    string
 	Params  []Parameter
 	Handler any
+
+	// The method takes a context as its first parameter.
+	// Set upon successful registration.
+	needsContext bool
 }
 
 type Server struct {
@@ -132,8 +141,16 @@ func (s *Server) RegisterMethod(method Method) error {
 	if handlerT.Kind() != reflect.Func {
 		return errors.New("handler must be a function")
 	}
-	if handlerT.NumIn() != len(method.Params) {
-		return errors.New("number of function params and param names must match")
+	var needsContext bool
+	numArgs := handlerT.NumIn()
+	if numArgs > 0 {
+		if handlerT.In(0).Implements(contextInterface) {
+			numArgs--
+			needsContext = true
+		}
+	}
+	if numArgs != len(method.Params) {
+		return errors.New("number of non-context function params and param names must match")
 	}
 	if handlerT.NumOut() != 2 {
 		return errors.New("handler must return 2 values")
@@ -142,6 +159,8 @@ func (s *Server) RegisterMethod(method Method) error {
 		return errors.New("second return value must be a *jsonrpc.Error")
 	}
 
+	// The method is valid. Mutate the appropriate fields and register on the server.
+	method.needsContext = needsContext
 	s.methods[method.Name] = method
 
 	return nil
@@ -150,14 +169,14 @@ func (s *Server) RegisterMethod(method Method) error {
 // Handle processes a request to the server
 // It returns the response in a byte array, only returns an
 // error if it can not create the response byte array
-func (s *Server) Handle(data []byte) ([]byte, error) {
-	return s.HandleReader(bytes.NewReader(data))
+func (s *Server) Handle(ctx context.Context, data []byte) ([]byte, error) {
+	return s.HandleReader(ctx, bytes.NewReader(data))
 }
 
 // HandleReader processes a request to the server
 // It returns the response in a byte array, only returns an
 // error if it can not create the response byte array
-func (s *Server) HandleReader(reader io.Reader) ([]byte, error) {
+func (s *Server) HandleReader(ctx context.Context, reader io.Reader) ([]byte, error) {
 	bufferedReader := bufio.NewReader(reader)
 	requestIsBatch := isBatch(bufferedReader)
 	res := &response{
@@ -171,7 +190,7 @@ func (s *Server) HandleReader(reader io.Reader) ([]byte, error) {
 		req := new(request)
 		if jsonErr := dec.Decode(req); jsonErr != nil {
 			res.Error = Err(InvalidJSON, jsonErr.Error())
-		} else if resObject, handleErr := s.handleRequest(req); handleErr != nil {
+		} else if resObject, handleErr := s.handleRequest(ctx, req); handleErr != nil {
 			if !errors.Is(handleErr, ErrInvalidID) {
 				res.ID = req.ID
 			}
@@ -202,7 +221,7 @@ func (s *Server) HandleReader(reader io.Reader) ([]byte, error) {
 					}
 				} else {
 					var handleErr error
-					resObject, handleErr = s.handleRequest(req)
+					resObject, handleErr = s.handleRequest(ctx, req)
 					if handleErr != nil {
 						resObject = &response{
 							Version: "2.0",
@@ -257,7 +276,7 @@ func isNil(i any) bool {
 	return i == nil || reflect.ValueOf(i).IsNil()
 }
 
-func (s *Server) handleRequest(req *request) (*response, error) {
+func (s *Server) handleRequest(ctx context.Context, req *request) (*response, error) {
 	start := time.Now()
 	reqJSON, err := json.Marshal(req)
 	if err == nil {
@@ -282,7 +301,7 @@ func (s *Server) handleRequest(req *request) (*response, error) {
 		return res, nil
 	}
 
-	args, err := s.buildArguments(req.Params, calledMethod.Handler, calledMethod.Params)
+	args, err := s.buildArguments(ctx, req.Params, calledMethod)
 	if err != nil {
 		res.Error = Err(InvalidParams, err.Error())
 		return res, nil
@@ -302,37 +321,52 @@ func (s *Server) handleRequest(req *request) (*response, error) {
 	return res, nil
 }
 
-func (s *Server) buildArguments(params, handler any, configuredParams []Parameter) ([]reflect.Value, error) {
-	args := make([]reflect.Value, 0, len(configuredParams))
+func (s *Server) buildArguments(ctx context.Context, params any, method Method) ([]reflect.Value, error) {
+	handlerType := reflect.TypeOf(method.Handler)
+	numArgs := handlerType.NumIn()
+
+	args := make([]reflect.Value, numArgs)
 	if isNil(params) {
-		if len(configuredParams) > 0 {
+		if len(method.Params) > 0 {
 			return nil, errors.New("missing non-optional param field")
 		}
 
 		return args, nil
 	}
 
-	handlerType := reflect.TypeOf(handler)
+	numNonContextArgs := numArgs
+	if method.needsContext {
+		numNonContextArgs--
+		// Insert context at beginning of args slice.
+		ctxV := reflect.ValueOf(ctx)
+		args[0] = ctxV
+	}
 
 	switch reflect.TypeOf(params).Kind() {
 	case reflect.Slice:
 		paramsList := params.([]any)
 
-		if len(paramsList) != handlerType.NumIn() {
+		if len(paramsList) != numNonContextArgs {
 			return nil, errors.New("missing/unexpected params in list")
 		}
 
 		for i, param := range paramsList {
+			if method.needsContext {
+				i++
+			}
 			v, err := s.parseParam(param, handlerType.In(i))
 			if err != nil {
 				return nil, err
 			}
-			args = append(args, v)
+			args[i] = v
 		}
 	case reflect.Map:
 		paramsMap := params.(map[string]any)
 
-		for i, configuredParam := range configuredParams {
+		for i, configuredParam := range method.Params {
+			if method.needsContext {
+				i++
+			}
 			var v reflect.Value
 			if param, found := paramsMap[configuredParam.Name]; found {
 				var err error
@@ -347,7 +381,7 @@ func (s *Server) buildArguments(params, handler any, configuredParams []Paramete
 				return nil, errors.New("missing non-optional param")
 			}
 
-			args = append(args, v)
+			args[i] = v
 		}
 	default:
 		// Todo: consider returning InternalError
