@@ -49,7 +49,7 @@ func (ws *Websocket) Handler(ctx context.Context) http.Handler {
 
 		// TODO include connection information, such as the remote address, in the logs.
 
-		wsc := newWebsocketConn(ctx, conn, ws.rpc, ws.connParams)
+		wsc := newWebsocketConn(ctx, conn, ws.rpc, ws.connParams) // TODO we can use r.Context()
 
 		err = wsc.ReadWriteLoop()
 
@@ -131,7 +131,7 @@ func (wsc *websocketConn) ReadWriteLoop() error {
 	var err error
 	for err == nil {
 		// Handle will read and write the connection once.
-		err = wsc.rpc.Handle(wsc)
+		err = wsc.rpc.Handle(wsc.ctx, wsc)
 	}
 	return err
 }
