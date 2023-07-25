@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/NethermindEth/juno/blockchain"
 	"github.com/NethermindEth/juno/clients/feeder"
 	"github.com/NethermindEth/juno/clients/gateway"
@@ -24,13 +25,20 @@ import (
 	"github.com/NethermindEth/juno/service"
 	adaptfeeder "github.com/NethermindEth/juno/starknetdata/feeder"
 	"github.com/NethermindEth/juno/sync"
+	"github.com/NethermindEth/juno/upgrader"
 	"github.com/NethermindEth/juno/utils"
 	"github.com/NethermindEth/juno/validator"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/sourcegraph/conc"
 )
 
-const defaultPprofPort = 9080
+const (
+	defaultPprofPort = 9080
+
+	upgraderDelay    = 5 * time.Minute
+	githubAPIUrl     = "https://api.github.com/repos/NethermindEth/juno/releases/latest"
+	latestReleaseURL = "https://github.com/NethermindEth/juno/releases/latest"
+)
 
 // Config is the top-level juno configuration.
 type Config struct {
@@ -112,7 +120,8 @@ func New(cfg *Config, version string) (*Node, error) {
 	if n.cfg.EthNode == "" {
 		n.log.Warnw("Ethereum node address not found; will not verify against L1")
 	} else {
-		l1Client, err := newL1Client(n.cfg.EthNode, n.blockchain, n.log)
+		var l1Client *l1.Client
+		l1Client, err = newL1Client(n.cfg.EthNode, n.blockchain, n.log)
 		if err != nil {
 			n.log.Errorw("Error creating L1 client", "err", err)
 			return nil, err
@@ -130,8 +139,10 @@ func New(cfg *Config, version string) (*Node, error) {
 	}
 
 	if cfg.P2P {
-		privKeyStr, _ := os.LookupEnv("P2P_PRIVATE_KEY")
-		p2pService, err := p2p.New(cfg.P2PAddr, "juno", cfg.P2PBootPeers, privKeyStr, cfg.Network, log)
+		var privKeyStr string
+		privKeyStr, _ = os.LookupEnv("P2P_PRIVATE_KEY")
+		var p2pService *p2p.Service
+		p2pService, err = p2p.New(cfg.P2PAddr, "juno", cfg.P2PBootPeers, privKeyStr, cfg.Network, log)
 		if err != nil {
 			log.Errorw("Error setting up p2p", "err", err)
 			return nil, err
@@ -139,6 +150,14 @@ func New(cfg *Config, version string) (*Node, error) {
 
 		n.services = append(n.services, p2pService)
 	}
+
+	semversion, err := semver.NewVersion(version)
+	if err != nil {
+		log.Errorw("Failed to parse version using semver", "version", version)
+		return nil, err
+	}
+	ug := upgrader.NewUpgrader(semversion, githubAPIUrl, latestReleaseURL, upgraderDelay, n.log)
+	n.services = append(n.services, ug)
 
 	return n, nil
 }
