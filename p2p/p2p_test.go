@@ -76,6 +76,27 @@ func TestService(t *testing.T) {
 		require.NoError(t, stream.Close())
 	})
 
+	t.Run("gossip", func(t *testing.T) {
+		topic := "coolTopic"
+		ch, closer, err := peerA.SubscribeToTopic(topic)
+		require.NoError(t, err)
+
+		// allow subscription to be propagated to peerB
+		time.Sleep(time.Second)
+
+		gossipedMessage := []byte(`veryImportantMessage`)
+		require.NoError(t, peerB.PublishOnTopic(topic, gossipedMessage))
+
+		select {
+		case <-time.After(5 * time.Second):
+			require.Equal(t, true, false)
+		case msg := <-ch:
+			require.Equal(t, gossipedMessage, msg)
+		}
+
+		closer()
+	})
+
 	cancel()
 	wg.Wait()
 }
