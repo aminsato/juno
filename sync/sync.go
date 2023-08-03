@@ -197,7 +197,7 @@ func (s *Synchronizer) verifierTask(ctx context.Context, block *core.Block, stat
 				} else {
 					s.HighestBlockHeader = highestBlock.Header
 
-					isBehind := s.HighestBlockHeader.Number > block.Number
+					isBehind := s.HighestBlockHeader.Number > block.Number+uint64(runtime.GOMAXPROCS(0))
 					if s.catchUpMode != isBehind {
 						resetStreams()
 					}
