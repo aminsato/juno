@@ -1038,7 +1038,7 @@ func (h *Handler) TransactionStatus(ctx context.Context, hash felt.Felt) (*Trans
 	case ErrTxnHashNotFound:
 		txStatus, err := h.feederClient.Transaction(ctx, &hash)
 		if err != nil {
-			return nil, jsonrpc.Err(jsonrpc.InternalError, err.Error())
+			return nil, jsonrpc.Err(jsonrpc.TransactionNotFound, err.Error())
 		}
 
 		// Check if the error is due to a transaction not being found
